@@ -1,2 +1,2 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# リポジトリ内は改行コードを LF に統一（CRLF による差分を防ぐ）
+* text=auto eol=lf
