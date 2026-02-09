@@ -1,2 +1,9 @@
-fastapi
-uvicorn
+# Web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Validation / serialization
+pydantic>=2.0.0
+
+# 木取図 PNG 生成（/api/diagram/png, /api/diagram/html）
+matplotlib>=3.7.0
