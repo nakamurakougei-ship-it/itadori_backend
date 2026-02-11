@@ -277,13 +277,29 @@ app = FastAPI(
     description="定尺板からの木取りネスティング・木取図生成 API",
     version="1.0.0",
 )
+# CORS: 全オリジン許可（preflight を通すため）。Cookie は使わないので credentials=False で可。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+
+# preflight (OPTIONS) が 400 になる環境向け: OPTIONS を明示的に 200 で返す
+@app.api_route("/api/{path:path}", methods=["OPTIONS"])
+def options_api(path: str):
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
 
 
 @app.get("/")
