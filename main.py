@@ -296,13 +296,15 @@ def as_long_short(a, b, lab):
 
 def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
     """
-    3x6 のみ・4x8 のみ・4x8と3x6の混在 を試し、総使用面積が最小の案を返す。
+    3x6 のみ・4x8 のみ・4x8と3x6の混在 を試す。
+    単一種で無駄（使用面積−部材面積）が少ない板種を優先し、その板種だけで済む場合は混在・他板種を選ばない。
     戻り値: (sheets, total_area)
     sheets は各枚が {"id", "label", "vw", "vh", "rows"} を持つ（混在時は枚ごとにサイズが異なる）。
     """
     engine = TrunkTechEngine(kerf=kerf)
     parts_list = [{"n": p.n, "w": p.w, "d": p.d} for p in parts]
     n_req = len(parts_list)
+    parts_area = sum(p["w"] * p["d"] for p in parts_list)
 
     def total_area(sheets, get_vw_vh):
         a = 0
@@ -312,6 +314,8 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
         return a
 
     candidates = []
+    area_36_only = None
+    area_48_only = None
 
     # 3x6 のみ
     s36 = engine.pack_sheets(parts_list, vw36, vh36)
@@ -320,7 +324,8 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
         out = []
         for i, sh in enumerate(s36):
             out.append({"id": i + 1, "label": "3x6", "vw": vw36, "vh": vh36, "rows": sh["rows"]})
-        candidates.append((out, total_area(out, lambda s: (s["vw"], s["vh"]))))
+        area_36_only = total_area(out, lambda s: (s["vw"], s["vh"]))
+        candidates.append((out, area_36_only))
 
     # 4x8 のみ
     s48 = engine.pack_sheets(parts_list, vw48, vh48)
@@ -329,7 +334,8 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
         out = []
         for i, sh in enumerate(s48):
             out.append({"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]})
-        candidates.append((out, total_area(out, lambda s: (s["vw"], s["vh"]))))
+        area_48_only = total_area(out, lambda s: (s["vw"], s["vh"]))
+        candidates.append((out, area_48_only))
 
     # 混在: 4x8 を k 枚使ってから残りを 3x6
     for k in range(1, len(s48) + 1):
@@ -363,7 +369,31 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
         fallback = [{"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]} for i, sh in enumerate(s48)]
         return (fallback, total_area(fallback, lambda s: (s["vw"], s["vh"])))
 
-    best = min(candidates, key=lambda x: (x[1], len(x[0])))
+    # 単一種の無駄面積（使用面積 − 部材総面積）。無駄が少ない板種を優先し、その板種だけで済むなら混在・他板種は選ばない。
+    waste_36 = (area_36_only - parts_area) if area_36_only is not None else float("inf")
+    waste_48 = (area_48_only - parts_area) if area_48_only is not None else float("inf")
+
+    def score(item):
+        sheets_list, area = item
+        n36 = sum(1 for s in sheets_list if s.get("label") == "3x6")
+        n48 = sum(1 for s in sheets_list if s.get("label") == "4x8")
+        is_36_only = n36 > 0 and n48 == 0
+        is_48_only = n48 > 0 and n36 == 0
+        is_mixed = n36 > 0 and n48 > 0
+        # 優先度: 無駄が少ない単一種 > 混在 > 無駄が多い単一種
+        if is_36_only and waste_36 <= waste_48:
+            tier = 0
+        elif is_48_only and waste_48 <= waste_36:
+            tier = 0
+        elif is_mixed:
+            tier = 1
+        else:
+            tier = 2
+        # 同点時は小さい板(3x6)を優先
+        prefer_small = 0 if is_36_only else (1 if is_48_only else 2)
+        return (tier, area, len(sheets_list), prefer_small)
+
+    best = min(candidates, key=score)
     return best
 
 
