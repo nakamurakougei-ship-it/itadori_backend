@@ -21,74 +21,11 @@ if "distutils" not in sys.modules:
     sys.modules["distutils"] = d
     sys.modules["distutils.version"] = d.version
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import matplotlib.font_manager as fm
-import base64
 import html
 import io
 import os
 
 _root = os.path.dirname(os.path.abspath(__file__))
-
-
-def _setup_japanese_font():
-    """木取図（PNG）内の日本語を表示するフォントを用意する。
-    1) アプリ同梱: font/IPAexGothic.ttf 等
-    2) Linux: Noto CJK 等
-    3) Windows: C:\\Windows\\Fonts の MS ゴシック等
-    戻り値: FontProperties（パス指定）。見つからなければ None。"""
-    def try_path(path):
-        if not path or not os.path.isfile(path):
-            return None
-        try:
-            if hasattr(fm.fontManager, "addfont"):
-                fm.fontManager.addfont(path)
-            prop = fm.FontProperties(fname=path)
-            name = prop.get_name()
-            plt.rcParams["font.sans-serif"] = [name] + [
-                x for x in plt.rcParams["font.sans-serif"] if x != name
-            ]
-            plt.rcParams["font.family"] = "sans-serif"
-            return prop
-        except Exception:
-            return None
-
-    app_fonts = [
-        os.path.join(_root, "font", "ipaexg.ttf"),
-        os.path.join(_root, "font", "IPAexGothic.ttf"),
-        os.path.join(_root, "fonts", "ipaexg.ttf"),
-        os.path.join(_root, "fonts", "IPAexGothic.ttf"),
-        os.path.join(_root, "ipaexg.ttf"),
-        os.path.join(_root, "IPAexGothic.ttf"),
-    ]
-    for path in app_fonts:
-        prop = try_path(path)
-        if prop is not None:
-            return prop
-
-    linux_fonts = [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/fonts-japanese-gothic/ttf/IPAexGothic.ttf",
-    ]
-    for path in linux_fonts:
-        prop = try_path(path)
-        if prop is not None:
-            return prop
-
-    windir = os.environ.get("SystemRoot", os.environ.get("WINDIR", "C:\\Windows"))
-    fonts_dir = os.path.join(windir, "Fonts")
-    for fname in ["msgothic.ttc", "msmincho.ttc", "meiryo.ttc", "yugothm.ttc"]:
-        prop = try_path(os.path.join(fonts_dir, fname))
-        if prop is not None:
-            return prop
-
-    return None
-
-
-_jp_font = _setup_japanese_font()
 
 
 # --- 木取りエンジン ---
@@ -197,36 +134,6 @@ class TrunkTechEngine:
             if not pack(p):
                 unplaced.append(p)
         return (sheets, unplaced)
-
-
-def render_sheet_to_png_bytes(sheet, v_w_full, v_h_full, label, jp_font=None):
-    """1枚の木取図を PNG の base64 で返す（/api/diagram/png 用）。日本語フォントがない場合は ASCII のみ。"""
-    font = jp_font if jp_font is not None else _jp_font
-    fig, ax = plt.subplots(figsize=(6, 3))
-    ax.set_xlim(0, v_w_full)
-    ax.set_ylim(0, v_h_full)
-    ax.set_aspect("equal")
-    ax.add_patch(patches.Rectangle((0, 0), v_w_full, v_h_full, fc="#fdf5e6", ec="#8b4513", lw=2))
-    kw_t = {"fontsize": 10, "fontweight": "bold"}
-    if font is not None:
-        kw_t["fontproperties"] = font
-    ax.set_title(
-        f"【木取り図】 ID:{sheet['id']} ({label}：{int(v_w_full)}x{int(v_h_full)})" if font else f"Layout ID:{sheet['id']} ({label}: {int(v_w_full)}x{int(v_h_full)})",
-        **kw_t,
-    )
-    kw_txt = {"ha": "center", "va": "center", "fontsize": 6, "fontweight": "bold"}
-    if font is not None:
-        kw_txt["fontproperties"] = font
-    for r in sheet["rows"]:
-        for p in r["parts"]:
-            ax.add_patch(patches.Rectangle((p["x"], p["y"]), p["w"], p["h"], lw=1, ec="black", fc="#deb887", alpha=0.8))
-            text = f"{p['n']}\n{int(p['w'])}x{int(p['h'])}" if font else f"{int(p['w'])}x{int(p['h'])}"
-            ax.text(p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, text, **kw_txt)
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
 
 
 def render_sheet_to_svg(sheet, v_w_full, v_h_full, label):
@@ -461,15 +368,6 @@ class PackAutoResponse(BaseModel):
     sheets: list  # 各要素は SheetWithSize 相当（label, vw, vh, rows）
 
 
-class DiagramPngRequest(BaseModel):
-    """木取図 PNG 生成のリクエスト（/pack の結果をそのまま渡すか、同等の構造）"""
-    label: str
-    vw: float
-    vh: float
-    sheets: list
-    sheet_id: Optional[int] = Field(None, ge=1, description="何枚目を PNG にするか。省略時は1枚目")
-
-
 class DiagramHtmlRequest(BaseModel):
     """木取図 印刷用 HTML 生成のリクエスト"""
     label: str
@@ -514,7 +412,7 @@ def root():
     """API の説明とヘルス確認"""
     return {
         "service": "itadori",
-        "message": "木取り API。POST /api/pack でネスティング、POST /api/diagram/png で図のPNG、POST /api/diagram/html で印刷用HTML。",
+        "message": "木取り API。POST /api/pack でネスティング、POST /api/diagram/html で印刷用HTML。",
         "docs": "/docs",
     }
 
@@ -555,22 +453,6 @@ def api_pack_auto(req: PackAutoRequest):
         total_parts_requested=len(req.parts),
         sheets=sheets,
     )
-
-
-@app.post("/api/diagram/png")
-def api_diagram_png(req: DiagramPngRequest):
-    """木取図を PNG 画像で返す。sheet_id 省略時は1枚目。"""
-    if not req.sheets:
-        raise HTTPException(status_code=400, detail="sheets が空です")
-    sid = req.sheet_id if req.sheet_id is not None else 1
-    if sid > len(req.sheets):
-        raise HTTPException(status_code=400, detail=f"sheet_id は 1〜{len(req.sheets)} の範囲で指定してください")
-    sheet = req.sheets[sid - 1]
-    v_w_full = req.vw + 2
-    v_h_full = req.vh + 2
-    b64 = render_sheet_to_png_bytes(sheet, v_w_full, v_h_full, req.label)
-    raw = base64.b64decode(b64)
-    return Response(content=raw, media_type="image/png")
 
 
 @app.post("/api/diagram/html", response_class=HTMLResponse)
