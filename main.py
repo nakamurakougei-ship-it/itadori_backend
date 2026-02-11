@@ -201,15 +201,12 @@ def as_long_short(a, b, lab):
     return (lo - 2, sh - 2, lab)
 
 
-def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
+def _find_best_mixed_inner(engine, parts_list, vw36, vh36, vw48, vh48):
     """
     3x6 のみ・4x8 のみ・4x8と3x6の混在 を試す。
     単一種で無駄（使用面積−部材面積）が少ない板種を優先し、その板種だけで済む場合は混在・他板種を選ばない。
-    戻り値: (sheets, total_area)
-    sheets は各枚が {"id", "label", "vw", "vh", "rows"} を持つ（混在時は枚ごとにサイズが異なる）。
+    戻り値: (sheets, total_area)。内部用。
     """
-    engine = TrunkTechEngine(kerf=kerf)
-    parts_list = [{"n": p.n, "w": p.w, "d": p.d} for p in parts]
     n_req = len(parts_list)
     parts_area = sum(p["w"] * p["d"] for p in parts_list)
 
@@ -224,7 +221,6 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
     area_36_only = None
     area_48_only = None
 
-    # 3x6 のみ
     s36 = engine.pack_sheets(parts_list, vw36, vh36)
     placed = sum(len(r["parts"]) for sh in s36 for r in sh["rows"])
     if placed == n_req:
@@ -234,7 +230,6 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
         area_36_only = total_area(out, lambda s: (s["vw"], s["vh"]))
         candidates.append((out, area_36_only))
 
-    # 4x8 のみ
     s48 = engine.pack_sheets(parts_list, vw48, vh48)
     placed = sum(len(r["parts"]) for sh in s48 for r in sh["rows"])
     if placed == n_req:
@@ -276,9 +271,11 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
         fallback = [{"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]} for i, sh in enumerate(s48)]
         return (fallback, total_area(fallback, lambda s: (s["vw"], s["vh"])))
 
-    # 単一種の無駄面積（使用面積 − 部材総面積）。無駄が少ない板種を優先し、その板種だけで済むなら混在・他板種は選ばない。
+    # 単一種の無駄面積（使用面積 − 部材総面積）。
+    # 部品の長辺が板の長手を超えるとその板には載らない（例: 2400mm は 3x6 の 1820 に載らない → 3x6 のみは候補にならない）。
     waste_36 = (area_36_only - parts_area) if area_36_only is not None else float("inf")
     waste_48 = (area_48_only - parts_area) if area_48_only is not None else float("inf")
+    best_single_waste = min(waste_36, waste_48)
 
     def score(item):
         sheets_list, area = item
@@ -287,21 +284,63 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
         is_36_only = n36 > 0 and n48 == 0
         is_48_only = n48 > 0 and n36 == 0
         is_mixed = n36 > 0 and n48 > 0
-        # 優先度: 無駄が少ない単一種 > 混在 > 無駄が多い単一種
-        if is_36_only and waste_36 <= waste_48:
+        waste = area - parts_area
+        # 混在で単一種より無駄が少ない場合は混在を最優先
+        if is_mixed and waste < best_single_waste:
             tier = 0
-        elif is_48_only and waste_48 <= waste_36:
-            tier = 0
-        elif is_mixed:
+        elif is_36_only and waste_36 <= waste_48:
             tier = 1
-        else:
+        elif is_48_only and waste_48 <= waste_36:
+            tier = 1
+        elif is_mixed:
             tier = 2
+        else:
+            tier = 3
         # 同点時は小さい板(3x6)を優先
         prefer_small = 0 if is_36_only else (1 if is_48_only else 2)
         return (tier, area, len(sheets_list), prefer_small)
 
     best = min(candidates, key=score)
     return best
+
+
+def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
+    """
+    3x6/4x8/混在 を試す。3x6 に載らない部品は先に 4x8 に載せ、残り部品だけで再度 3x6/4x8/混在 を判定する（ID ごとに残りで 3x6 判定可能に）。
+    戻り値: (sheets, total_area)
+    """
+    engine = TrunkTechEngine(kerf=kerf)
+    parts_list = [{"n": p.n, "w": p.w, "d": p.d} for p in parts]
+
+    def total_area(sheets, get_vw_vh):
+        a = 0
+        for s in sheets:
+            vw, vh = get_vw_vh(s)
+            a += vw * vh
+        return a
+
+    def fits_36(p):
+        norm = _normalize_part(dict(p))
+        return norm["w"] <= vw36 and norm["d"] <= vh36
+
+    must_48 = [p for p in parts_list if not fits_36(p)]
+    rest = [p for p in parts_list if fits_36(p)]
+
+    # 3x6 に載らない部品がある → 先に 4x8 に載せ、残りだけ 3x6/4x8/混在 を判定（ID2 以降で 3x6 が選ばれる）
+    if must_48:
+        sheets_48_first = engine.pack_sheets(must_48, vw48, vh48)
+        out = []
+        for i, sh in enumerate(sheets_48_first):
+            out.append({"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]})
+        if not rest:
+            return (out, total_area(out, lambda s: (s["vw"], s["vh"])))
+        rest_sheets, _ = _find_best_mixed_inner(engine, rest, vw36, vh36, vw48, vh48)
+        base_id = len(out)
+        for s in rest_sheets:
+            out.append({"id": base_id + s["id"], "label": s["label"], "vw": s["vw"], "vh": s["vh"], "rows": s["rows"]})
+        return (out, total_area(out, lambda s: (s["vw"], s["vh"])))
+
+    return _find_best_mixed_inner(engine, parts_list, vw36, vh36, vw48, vh48)
 
 
 # --- FastAPI ---
