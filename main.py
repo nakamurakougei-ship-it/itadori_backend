@@ -27,8 +27,9 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.font_manager as fm
 import base64
-import os
+import html
 import io
+import os
 
 _root = os.path.dirname(os.path.abspath(__file__))
 
@@ -154,9 +155,7 @@ class TrunkTechEngine:
 
 
 def render_sheet_to_png_bytes(sheet, v_w_full, v_h_full, label, jp_font=None):
-    """1枚の木取図を PNG の base64 バイト列で返す（印刷用）。
-    jp_font: 日本語用 FontProperties。省略時はモジュールの _jp_font を使用。
-    日本語フォントがない環境（例: Render）では ASCII のみ表示して文字化けを防ぐ。"""
+    """1枚の木取図を PNG の base64 で返す（/api/diagram/png 用）。日本語フォントがない場合は ASCII のみ。"""
     font = jp_font if jp_font is not None else _jp_font
     fig, ax = plt.subplots(figsize=(6, 3))
     ax.set_xlim(0, v_w_full)
@@ -166,20 +165,18 @@ def render_sheet_to_png_bytes(sheet, v_w_full, v_h_full, label, jp_font=None):
     kw_t = {"fontsize": 10, "fontweight": "bold"}
     if font is not None:
         kw_t["fontproperties"] = font
-    if font is not None:
-        ax.set_title(f"【木取り図】 ID:{sheet['id']} ({label}：{int(v_w_full)}x{int(v_h_full)})", **kw_t)
-    else:
-        ax.set_title(f"Layout ID:{sheet['id']} ({label}: {int(v_w_full)}x{int(v_h_full)})", **kw_t)
+    ax.set_title(
+        f"【木取り図】 ID:{sheet['id']} ({label}：{int(v_w_full)}x{int(v_h_full)})" if font else f"Layout ID:{sheet['id']} ({label}: {int(v_w_full)}x{int(v_h_full)})",
+        **kw_t,
+    )
     kw_txt = {"ha": "center", "va": "center", "fontsize": 6, "fontweight": "bold"}
     if font is not None:
         kw_txt["fontproperties"] = font
     for r in sheet["rows"]:
         for p in r["parts"]:
             ax.add_patch(patches.Rectangle((p["x"], p["y"]), p["w"], p["h"], lw=1, ec="black", fc="#deb887", alpha=0.8))
-            if font is not None:
-                ax.text(p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, f"{p['n']}\n{int(p['w'])}x{int(p['h'])}", **kw_txt)
-            else:
-                ax.text(p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, f"{int(p['w'])}x{int(p['h'])}", **kw_txt)
+            text = f"{p['n']}\n{int(p['w'])}x{int(p['h'])}" if font else f"{int(p['w'])}x{int(p['h'])}"
+            ax.text(p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, text, **kw_txt)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -187,32 +184,57 @@ def render_sheet_to_png_bytes(sheet, v_w_full, v_h_full, label, jp_font=None):
     return base64.b64encode(buf.read()).decode("utf-8")
 
 
+def render_sheet_to_svg(sheet, v_w_full, v_h_full, label):
+    """1枚の木取図を SVG 文字列で返す（印刷用）。フォント不要で日本語も表示される。"""
+    vw, vh = int(v_w_full), int(v_h_full)
+    title = html.escape(f"【木取り図】 ID:{sheet['id']} ({label}：{vw}x{vh})")
+    parts_svg = []
+    for r in sheet["rows"]:
+        for p in r["parts"]:
+            x, y, w, h = p["x"], p["y"], p["w"], p["h"]
+            name_esc = html.escape(str(p["n"]))
+            dims = f"{int(w)}×{int(h)}"
+            parts_svg.append(
+                f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#deb887" stroke="#333" stroke-width="1"/>'
+                f'<text x="{x + w/2}" y="{y + h/2}" text-anchor="middle" dominant-baseline="middle" '
+                f'font-size="{min(14, h/4)}" font-weight="bold" fill="#1a1a1a">{name_esc}</text>'
+                f'<text x="{x + w/2}" y="{y + h/2 + (h/4 or 10)}" text-anchor="middle" dominant-baseline="middle" '
+                f'font-size="{min(10, h/6)}" fill="#444">{dims}</text>'
+            )
+    inner = "".join(parts_svg)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vw} {vh}" '
+        f'style="max-width:100%;height:auto;font-family:sans-serif">'
+        f'<rect x="0" y="0" width="{vw}" height="{vh}" fill="#fdf5e6" stroke="#8b4513" stroke-width="2"/>'
+        f'<text x="{vw/2}" y="20" text-anchor="middle" font-size="14" font-weight="bold" fill="#333">{title}</text>'
+        f'{inner}</svg>'
+    )
+
+
 def build_print_html(best, max_per_page=None, jp_font=None):
-    """木取図を印刷用 HTML 文字列で返す。
-    best: {"label", "vw", "vh", "sheets"} の辞書。
-    max_per_page: 1ページに載せる図の枚数。未指定時は1枚ずつ1ページ。"""
+    """木取図を印刷用 HTML 文字列で返す（SVG 埋め込み。日本語フォント不要）。"""
     v_w_full = best["vw"] + 2
     v_h_full = best["vh"] + 2
     label = best["label"]
-    images_b64 = []
+    svg_list = []
     for s in best["sheets"]:
-        images_b64.append(render_sheet_to_png_bytes(s, v_w_full, v_h_full, label, jp_font=jp_font))
+        svg_list.append(render_sheet_to_svg(s, v_w_full, v_h_full, label))
     chunk = max_per_page if max_per_page is not None and max_per_page >= 1 else 1
-    pages = [images_b64[i : i + chunk] for i in range(0, len(images_b64), chunk)]
+    pages = [svg_list[i : i + chunk] for i in range(0, len(svg_list), chunk)]
     html_parts = [
         """<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
 @media print { @page { size: A4; margin: 10mm; } body { margin: 0; } }
 .diagram-page { page-break-after: always; padding: 0; }
 .diagram-page:last-child { page-break-after: auto; }
-.diagram-img { width: 100%; max-height: 32%; object-fit: contain; margin-bottom: 2mm; }
+.diagram-svg { width: 100%; max-height: 32vh; object-fit: contain; margin-bottom: 2mm; }
 h1 { font-size: 14pt; margin-bottom: 4mm; }
 </style></head><body>"""
     ]
-    for i, page_imgs in enumerate(pages):
+    for i, page_svgs in enumerate(pages):
         html_parts.append(f'<div class="diagram-page"><h1>木取図（{label}）— {i+1}ページ目</h1>')
-        for j, b64 in enumerate(page_imgs):
-            html_parts.append(f'<img class="diagram-img" src="data:image/png;base64,{b64}" alt="木取図{j+1}"/>')
+        for j, svg in enumerate(page_svgs):
+            html_parts.append(f'<div class="diagram-svg">{svg}</div>')
         html_parts.append("</div>")
     html_parts.append("</body></html>")
     return "".join(html_parts)
