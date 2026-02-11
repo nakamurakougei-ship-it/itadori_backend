@@ -153,6 +153,51 @@ class TrunkTechEngine:
                     })
         return sheets
 
+    def pack_sheets_max(self, parts, vw, vh, max_sheets):
+        """
+        最大 max_sheets 枚まで詰め、収まらなかった部品を返す。
+        戻り値: (sheets, unplaced_parts)
+        """
+        normalized = [_normalize_part(dict(p)) for p in parts]
+        valid = [p for p in normalized if p["w"] <= vw and p["d"] <= vh]
+        sorted_parts = sorted(valid, key=lambda x: (x["w"], x["d"]), reverse=True)
+        sheets = []
+        unplaced = []
+
+        def pack(p):
+            for s in sheets:
+                for r in s["rows"]:
+                    if r["h"] >= p["d"] and (vw - r["used_w"]) >= p["w"]:
+                        r["parts"].append({
+                            "n": p["n"], "x": r["used_w"], "y": r["y"],
+                            "w": p["w"], "h": p["d"],
+                        })
+                        r["used_w"] += p["w"] + self.kerf
+                        return True
+                if (vh - s["used_h"]) >= p["d"]:
+                    s["rows"].append({
+                        "y": s["used_h"], "h": p["d"], "used_w": p["w"] + self.kerf,
+                        "parts": [{"n": p["n"], "x": 0, "y": s["used_h"], "w": p["w"], "h": p["d"]}],
+                    })
+                    s["used_h"] += p["d"] + self.kerf
+                    return True
+            if len(sheets) < max_sheets and p["w"] <= vw and p["d"] <= vh:
+                sheets.append({
+                    "id": len(sheets) + 1,
+                    "used_h": p["d"] + self.kerf,
+                    "rows": [{
+                        "y": 0, "h": p["d"], "used_w": p["w"] + self.kerf,
+                        "parts": [{"n": p["n"], "x": 0, "y": 0, "w": p["w"], "h": p["d"]}],
+                    }],
+                })
+                return True
+            return False
+
+        for p in sorted_parts:
+            if not pack(p):
+                unplaced.append(p)
+        return (sheets, unplaced)
+
 
 def render_sheet_to_png_bytes(sheet, v_w_full, v_h_full, label, jp_font=None):
     """1枚の木取図を PNG の base64 で返す（/api/diagram/png 用）。日本語フォントがない場合は ASCII のみ。"""
@@ -212,13 +257,16 @@ def render_sheet_to_svg(sheet, v_w_full, v_h_full, label):
 
 
 def build_print_html(best, max_per_page=None, jp_font=None):
-    """木取図を印刷用 HTML 文字列で返す（SVG 埋め込み。日本語フォント不要）。"""
-    v_w_full = best["vw"] + 2
-    v_h_full = best["vh"] + 2
-    label = best["label"]
+    """木取図を印刷用 HTML 文字列で返す（SVG 埋め込み）。シートごとに vw, vh, label があれば混在用。"""
+    default_vw = best.get("vw", 0) + 2
+    default_vh = best.get("vh", 0) + 2
+    default_label = best.get("label", "板")
     svg_list = []
     for s in best["sheets"]:
-        svg_list.append(render_sheet_to_svg(s, v_w_full, v_h_full, label))
+        vw = s.get("vw", default_vw - 2) + 2
+        vh = s.get("vh", default_vh - 2) + 2
+        label = s.get("label", default_label)
+        svg_list.append(render_sheet_to_svg(s, vw, vh, label))
     chunk = max_per_page if max_per_page is not None and max_per_page >= 1 else 1
     pages = [svg_list[i : i + chunk] for i in range(0, len(svg_list), chunk)]
     html_parts = [
@@ -232,7 +280,7 @@ h1 { font-size: 14pt; margin-bottom: 4mm; }
 </style></head><body>"""
     ]
     for i, page_svgs in enumerate(pages):
-        html_parts.append(f'<div class="diagram-page"><h1>木取図（{label}）— {i+1}ページ目</h1>')
+        html_parts.append(f'<div class="diagram-page"><h1>木取図 — {i+1}ページ目</h1>')
         for j, svg in enumerate(page_svgs):
             html_parts.append(f'<div class="diagram-svg">{svg}</div>')
         html_parts.append("</div>")
@@ -244,6 +292,79 @@ def as_long_short(a, b, lab):
     """定尺を (長手, 短手) の順で返す。板ラベル lab 付き。鼻切り -2mm は呼び出し元で適用すること。"""
     lo, sh = max(a, b), min(a, b)
     return (lo - 2, sh - 2, lab)
+
+
+def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
+    """
+    3x6 のみ・4x8 のみ・4x8と3x6の混在 を試し、総使用面積が最小の案を返す。
+    戻り値: (sheets, total_area)
+    sheets は各枚が {"id", "label", "vw", "vh", "rows"} を持つ（混在時は枚ごとにサイズが異なる）。
+    """
+    engine = TrunkTechEngine(kerf=kerf)
+    parts_list = [{"n": p.n, "w": p.w, "d": p.d} for p in parts]
+    n_req = len(parts_list)
+
+    def total_area(sheets, get_vw_vh):
+        a = 0
+        for s in sheets:
+            vw, vh = get_vw_vh(s)
+            a += vw * vh
+        return a
+
+    candidates = []
+
+    # 3x6 のみ
+    s36 = engine.pack_sheets(parts_list, vw36, vh36)
+    placed = sum(len(r["parts"]) for sh in s36 for r in sh["rows"])
+    if placed == n_req:
+        out = []
+        for i, sh in enumerate(s36):
+            out.append({"id": i + 1, "label": "3x6", "vw": vw36, "vh": vh36, "rows": sh["rows"]})
+        candidates.append((out, total_area(out, lambda s: (s["vw"], s["vh"]))))
+
+    # 4x8 のみ
+    s48 = engine.pack_sheets(parts_list, vw48, vh48)
+    placed = sum(len(r["parts"]) for sh in s48 for r in sh["rows"])
+    if placed == n_req:
+        out = []
+        for i, sh in enumerate(s48):
+            out.append({"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]})
+        candidates.append((out, total_area(out, lambda s: (s["vw"], s["vh"]))))
+
+    # 混在: 4x8 を k 枚使ってから残りを 3x6
+    for k in range(1, len(s48) + 1):
+        s48_k, unplaced = engine.pack_sheets_max(parts_list, vw48, vh48, k)
+        s36_rest = engine.pack_sheets(unplaced, vw36, vh36) if unplaced else []
+        placed_48 = sum(len(r["parts"]) for sh in s48_k for r in sh["rows"])
+        placed_36 = sum(len(r["parts"]) for sh in s36_rest for r in sh["rows"])
+        if placed_48 + placed_36 == n_req:
+            out = []
+            for i, sh in enumerate(s48_k):
+                out.append({"id": len(out) + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]})
+            for i, sh in enumerate(s36_rest):
+                out.append({"id": len(out) + 1, "label": "3x6", "vw": vw36, "vh": vh36, "rows": sh["rows"]})
+            candidates.append((out, total_area(out, lambda s: (s["vw"], s["vh"]))))
+
+    # 混在: 3x6 を k 枚使ってから残りを 4x8
+    for k in range(1, len(s36) + 1):
+        s36_k, unplaced = engine.pack_sheets_max(parts_list, vw36, vh36, k)
+        s48_rest = engine.pack_sheets(unplaced, vw48, vh48) if unplaced else []
+        placed_36 = sum(len(r["parts"]) for sh in s36_k for r in sh["rows"])
+        placed_48 = sum(len(r["parts"]) for sh in s48_rest for r in sh["rows"])
+        if placed_36 + placed_48 == n_req:
+            out = []
+            for i, sh in enumerate(s36_k):
+                out.append({"id": len(out) + 1, "label": "3x6", "vw": vw36, "vh": vh36, "rows": sh["rows"]})
+            for i, sh in enumerate(s48_rest):
+                out.append({"id": len(out) + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]})
+            candidates.append((out, total_area(out, lambda s: (s["vw"], s["vh"]))))
+
+    if not candidates:
+        fallback = [{"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]} for i, sh in enumerate(s48)]
+        return (fallback, total_area(fallback, lambda s: (s["vw"], s["vh"])))
+
+    best = min(candidates, key=lambda x: (x[1], len(x[0])))
+    return best
 
 
 # --- FastAPI ---
@@ -281,6 +402,33 @@ class PackResponse(BaseModel):
     total_parts_placed: int
     total_parts_requested: int
     sheets: list
+
+
+class PackAutoRequest(BaseModel):
+    """自動選定（3x6・4x8・混在）のリクエスト"""
+    parts: list[PartInput] = Field(..., min_length=1)
+    vw36: float = Field(..., gt=0, description="3x6 長手 (mm)")
+    vh36: float = Field(..., gt=0, description="3x6 短手 (mm)")
+    vw48: float = Field(..., gt=0, description="4x8 長手 (mm)")
+    vh48: float = Field(..., gt=0, description="4x8 短手 (mm)")
+    kerf: float = Field(3.0, ge=0)
+
+
+class SheetWithSize(BaseModel):
+    """枚ごとにサイズを持つシート（混在用）"""
+    id: int
+    label: str
+    vw: float
+    vh: float
+    rows: list
+
+
+class PackAutoResponse(BaseModel):
+    """自動選定のレスポンス（3x6と4x8の混在あり）"""
+    sheet_count: int
+    total_parts_placed: int
+    total_parts_requested: int
+    sheets: list  # 各要素は SheetWithSize 相当（label, vw, vh, rows）
 
 
 class DiagramPngRequest(BaseModel):
@@ -360,6 +508,21 @@ def api_pack(req: PackRequest):
         sheet_count=len(sheets),
         total_parts_placed=total_placed,
         total_parts_requested=len(parts),
+        sheets=sheets,
+    )
+
+
+@app.post("/api/pack_auto", response_model=PackAutoResponse)
+def api_pack_auto(req: PackAutoRequest):
+    """3x6 のみ・4x8 のみ・3x6と4x8の混在 を試し、総使用面積が最小の案を返す。"""
+    sheets, _area = find_best_mixed(
+        req.parts, req.vw36, req.vh36, req.vw48, req.vh48, req.kerf
+    )
+    total_placed = sum(len(r["parts"]) for s in sheets for r in s["rows"])
+    return PackAutoResponse(
+        sheet_count=len(sheets),
+        total_parts_placed=total_placed,
+        total_parts_requested=len(req.parts),
         sheets=sheets,
     )
 
