@@ -306,7 +306,8 @@ def _find_best_mixed_inner(engine, parts_list, vw36, vh36, vw48, vh48):
 
 def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
     """
-    3x6/4x8/混在 を試す。3x6 に載らない部品は先に 4x8 に載せ、残り部品だけで再度 3x6/4x8/混在 を判定する（ID ごとに残りで 3x6 判定可能に）。
+    3x6/4x8/混在 を試す。
+    3x6 に載らない部品がある場合: 全部品をまず 4x8 に詰め（大きい部材の隙間に小さい部材もネスト）、入りきらなかった分だけ 3x6 に載せる。
     戻り値: (sheets, total_area)
     """
     engine = TrunkTechEngine(kerf=kerf)
@@ -326,18 +327,23 @@ def find_best_mixed(parts, vw36, vh36, vw48, vh48, kerf):
     must_48 = [p for p in parts_list if not fits_36(p)]
     rest = [p for p in parts_list if fits_36(p)]
 
-    # 3x6 に載らない部品がある → 先に 4x8 に載せ、残りだけ 3x6/4x8/混在 を判定（ID2 以降で 3x6 が選ばれる）
+    # 3x6 に載らない部品がある場合: 全部品をまず 4x8 に詰め、4x8 の余りに小さい部材もネスト。入りきらなかった分だけ 3x6 に載せる。
+    if must_48 and rest:
+        combined = must_48 + rest
+        max_sheets = max(len(combined) + 10, 200)
+        sheets_48, unplaced = engine.pack_sheets_max(combined, vw48, vh48, max_sheets)
+        out = []
+        for i, sh in enumerate(sheets_48):
+            out.append({"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]})
+        if unplaced:
+            sheets_36 = engine.pack_sheets(unplaced, vw36, vh36)
+            base_id = len(out)
+            for i, sh in enumerate(sheets_36):
+                out.append({"id": base_id + i + 1, "label": "3x6", "vw": vw36, "vh": vh36, "rows": sh["rows"]})
+        return (out, total_area(out, lambda s: (s["vw"], s["vh"])))
     if must_48:
         sheets_48_first = engine.pack_sheets(must_48, vw48, vh48)
-        out = []
-        for i, sh in enumerate(sheets_48_first):
-            out.append({"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]})
-        if not rest:
-            return (out, total_area(out, lambda s: (s["vw"], s["vh"])))
-        rest_sheets, _ = _find_best_mixed_inner(engine, rest, vw36, vh36, vw48, vh48)
-        base_id = len(out)
-        for s in rest_sheets:
-            out.append({"id": base_id + s["id"], "label": s["label"], "vw": s["vw"], "vh": s["vh"], "rows": s["rows"]})
+        out = [{"id": i + 1, "label": "4x8", "vw": vw48, "vh": vh48, "rows": sh["rows"]} for i, sh in enumerate(sheets_48_first)]
         return (out, total_area(out, lambda s: (s["vw"], s["vh"])))
 
     return _find_best_mixed_inner(engine, parts_list, vw36, vh36, vw48, vh48)
