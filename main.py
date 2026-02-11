@@ -155,7 +155,8 @@ class TrunkTechEngine:
 
 def render_sheet_to_png_bytes(sheet, v_w_full, v_h_full, label, jp_font=None):
     """1枚の木取図を PNG の base64 バイト列で返す（印刷用）。
-    jp_font: 日本語用 FontProperties。省略時はモジュールの _jp_font を使用。"""
+    jp_font: 日本語用 FontProperties。省略時はモジュールの _jp_font を使用。
+    日本語フォントがない環境（例: Render）では ASCII のみ表示して文字化けを防ぐ。"""
     font = jp_font if jp_font is not None else _jp_font
     fig, ax = plt.subplots(figsize=(6, 3))
     ax.set_xlim(0, v_w_full)
@@ -165,14 +166,20 @@ def render_sheet_to_png_bytes(sheet, v_w_full, v_h_full, label, jp_font=None):
     kw_t = {"fontsize": 10, "fontweight": "bold"}
     if font is not None:
         kw_t["fontproperties"] = font
-    ax.set_title(f"【木取り図】 ID:{sheet['id']} ({label}：{int(v_w_full)}x{int(v_h_full)})", **kw_t)
+    if font is not None:
+        ax.set_title(f"【木取り図】 ID:{sheet['id']} ({label}：{int(v_w_full)}x{int(v_h_full)})", **kw_t)
+    else:
+        ax.set_title(f"Layout ID:{sheet['id']} ({label}: {int(v_w_full)}x{int(v_h_full)})", **kw_t)
     kw_txt = {"ha": "center", "va": "center", "fontsize": 6, "fontweight": "bold"}
     if font is not None:
         kw_txt["fontproperties"] = font
     for r in sheet["rows"]:
         for p in r["parts"]:
             ax.add_patch(patches.Rectangle((p["x"], p["y"]), p["w"], p["h"], lw=1, ec="black", fc="#deb887", alpha=0.8))
-            ax.text(p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, f"{p['n']}\n{int(p['w'])}x{int(p['h'])}", **kw_txt)
+            if font is not None:
+                ax.text(p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, f"{p['n']}\n{int(p['w'])}x{int(p['h'])}", **kw_txt)
+            else:
+                ax.text(p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, f"{int(p['w'])}x{int(p['h'])}", **kw_txt)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
